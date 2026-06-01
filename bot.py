@@ -151,10 +151,17 @@ def handle_update(update):
         send_message(chat_id, "أرسل /help لرؤية الأوامر المتاحة.")
 
 class WebhookHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Afaq bot is running.")
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
         self.end_headers()
         try:
             update = json.loads(body)
