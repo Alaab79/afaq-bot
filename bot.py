@@ -173,6 +173,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     print(f"Starting آفاق bot on port {port}...")
     HTTPServer(("0.0.0.0", port), WebhookHandler).serve_forever()
