@@ -2,11 +2,16 @@ import os
 import json
 import random
 import requests
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
-ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "YOUR_KEY_HERE")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+def log(msg):
+    print(msg, flush=True)
+    sys.stdout.flush()
 
 PILLAR_DATA = {
     "ai": {
@@ -16,8 +21,6 @@ PILLAR_DATA = {
              "ideas": "AGI is closer than people think · AI will create abundance but also displacement · OpenAI safety vs speed tension · What jobs survive AI · The importance of AI alignment"},
             {"source": "Lex Fridman", "episode": "Sundar Pichai — Google, AI, and the Future", "views": "8M+",
              "ideas": "AI is the most profound tech shift in history · Gemini vs GPT competition · AI changing how we search · Responsibility of AI companies · Impact on all industries"},
-            {"source": "Lex Fridman", "episode": "Yuval Noah Harari — AI, Power and Humanity", "views": "5M+",
-             "ideas": "AI can hack human psychology at scale · Who controls the algorithm controls society · Democracy threatened by AI propaganda · Humans need new stories for the AI age"},
         ]
     },
     "finance": {
@@ -34,8 +37,6 @@ PILLAR_DATA = {
         "episodes": [
             {"source": "Peter Zeihan", "episode": "China's Fall and the End of Globalization", "views": "4M+",
              "ideas": "China demographics mean it gets old before rich · US reshoring manufacturing · Global supply chains ending · Energy independence as strategic weapon · Middle East must diversify faster"},
-            {"source": "All-In Podcast", "episode": "The New World Order — AI and Energy Shifts", "views": "3M+",
-             "ideas": "AI is the new oil · Gulf states making right bets on AI · Petrodollar system eroding · Vision 2030 most ambitious national transformation ever · Gulf has narrow window to diversify"},
         ]
     },
     "mindset": {
@@ -54,49 +55,59 @@ PILLAR_DATA = {
     },
 }
 
-HELP_TEXT = """
-🌐 *آفاق Content Agent*
+HELP_TEXT = """مرحباً! أنا وكيل آفاق لإنتاج المحتوى.
 
-مرحباً! أنا وكيلك الذكي لإنتاج محتوى قناة آفاق.
+الأوامر المتاحة:
+/run ai
+/run finance
+/run geo
+/run mindset
+/run business
+/run — نص عشوائي
+/help — المساعدة"""
 
-*الأوامر المتاحة:*
-/run ai — نص عن الذكاء الاصطناعي
-/run finance — نص عن المال والاستثمار
-/run geo — نص عن الجيوسياسة
-/run mindset — نص عن العقلية والعادات
-/run business — نص عن الأعمال
-/run — نص عشوائي من أي محور
-/help — عرض هذه المساعدة
-
-*مثال:* أرسل `/run finance` واحصل على نص كامل جاهز للتسجيل في ElevenLabs خلال دقيقتين.
-"""
-
-def send_message(chat_id, text, parse_mode="Markdown"):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode
-    })
+def send_message(chat_id, text):
+    try:
+        r = requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text
+        }, timeout=10)
+        log(f"send_message status: {r.status_code}")
+    except Exception as e:
+        log(f"send_message error: {e}")
 
 def send_typing(chat_id):
-    requests.post(f"{TELEGRAM_API}/sendChatAction", json={
-        "chat_id": chat_id,
-        "action": "typing"
-    })
+    try:
+        requests.post(f"{TELEGRAM_API}/sendChatAction", json={
+            "chat_id": chat_id,
+            "action": "typing"
+        }, timeout=5)
+    except Exception as e:
+        log(f"send_typing error: {e}")
 
 def call_claude(system, user):
+    log("Calling Claude API...")
     r = requests.post("https://api.anthropic.com/v1/messages",
-        headers={"Content-Type": "application/json",
-                 "x-api-key": ANTHROPIC_KEY,
-                 "anthropic-version": "2023-06-01"},
-        json={"model": "claude-sonnet-4-20250514",
-              "max_tokens": 1000,
-              "system": system,
-              "messages": [{"role": "user", "content": user}]})
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01"
+        },
+        json={
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1000,
+            "system": system,
+            "messages": [{"role": "user", "content": user}]
+        },
+        timeout=60
+    )
+    log(f"Claude API status: {r.status_code}")
     data = r.json()
     return "".join(b["text"] for b in data.get("content", []) if b["type"] == "text")
 
 def run_agent(chat_id, pillar_key):
+    log(f"run_agent called with pillar: {pillar_key}")
+
     if pillar_key == "random" or pillar_key not in PILLAR_DATA:
         pillar_key = random.choice(list(PILLAR_DATA.keys()))
 
@@ -104,40 +115,37 @@ def run_agent(chat_id, pillar_key):
     ep = random.choice(pillar["episodes"])
 
     send_typing(chat_id)
-    send_message(chat_id, f"⚙️ *تشغيل الوكيل...*\n\nالمحور: {pillar['label']}\nالمصدر: {ep['source']} — {ep['episode']} ({ep['views']} مشاهدة)\n\n_جارٍ توليد النص العربي..._")
+    send_message(chat_id, f"جارٍ توليد النص...\n\nالمحور: {pillar['label']}\nالمصدر: {ep['source']}")
 
-    script = call_claude(
-        "أنت كاتب محتوى لقناة آفاق على يوتيوب. تكتب بالعربية الفصحى المبسطة. ابدأ بخطاف قوي (15 ثانية)، ثم مقدمة، ثم 4-5 نقاط مع سياق خليجي وعربي، ثم دعوة للاشتراك. اكتب النص فقط بدون تعليقات.",
-        f"المحور: {pillar['label']}\nالحلقة: {ep['episode']} ({ep['source']})\nالأفكار الأساسية: {ep['ideas']}\n\nاكتب نصاً عربياً أصيلاً بمدة 6-8 دقائق مع إضافة أمثلة خليجية وعربية محددة."
-    )
+    try:
+        script = call_claude(
+            "أنت كاتب محتوى لقناة آفاق على يوتيوب. تكتب بالعربية الفصحى المبسطة. ابدأ بخطاف قوي ثم 4 نقاط مع سياق عربي ثم دعوة للاشتراك. اكتب النص فقط.",
+            f"المحور: {pillar['label']}\nالحلقة: {ep['episode']}\nالأفكار: {ep['ideas']}\n\nاكتب نصاً عربياً بمدة 6 دقائق مع أمثلة خليجية."
+        )
 
-    title = call_claude(
-        "أنت خبير SEO يوتيوب عربي. أعط عنواناً يوتيوب عربياً جذاباً فقط (بدون أي نص آخر، 60 حرفاً كحد أقصى).",
-        f"المحور: {pillar['label']}\nالنص: {script[:300]}"
-    )
+        title = call_claude(
+            "أعط عنواناً يوتيوب عربياً جذاباً فقط، 60 حرفاً كحد أقصى، بدون أي نص آخر.",
+            f"النص: {script[:300]}"
+        )
 
-    output = f"""
-✅ *النص جاهز!*
+        msg = f"✅ النص جاهز!\n\n📺 العنوان:\n{title.strip()}\n\n📝 النص:\n{script[:3500]}"
+        send_message(chat_id, msg)
+        log("Script sent successfully")
 
-📺 *العنوان المقترح:*
-{title.strip()}
-
-📝 *النص الكامل:*
-{script[:3000]}{"..." if len(script) > 3000 else ""}
-
-🎙 *ElevenLabs:* صوت عربي هادئ، سرعة أبطأ من الافتراضي قليلاً
-🎬 *CapCut:* فعّل الترجمة العربية التلقائية
-📌 *المصدر:* {ep['source']} — {ep['episode']}
-    """
-
-    send_message(chat_id, output.strip())
+    except Exception as e:
+        log(f"run_agent error: {e}")
+        send_message(chat_id, f"حدث خطأ: {str(e)}")
 
 def handle_update(update):
+    log(f"handle_update: {json.dumps(update)[:200]}")
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text", "").strip().lower()
 
+    log(f"chat_id: {chat_id}, text: {text}")
+
     if not chat_id or not text:
+        log("No chat_id or text — skipping")
         return
 
     if text in ["/start", "/help"]:
@@ -152,14 +160,17 @@ def handle_update(update):
 
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        log(f"GET request from {self.client_address}")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Afaq bot is running.")
 
     def do_POST(self):
+        log(f"POST request from {self.client_address}, path: {self.path}")
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        log(f"POST body length: {length}")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -167,12 +178,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             update = json.loads(body)
             handle_update(update)
         except Exception as e:
-            print(f"Error: {e}")
+            log(f"POST handler error: {e}")
 
     def log_message(self, *args):
         pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"Starting آفاق bot on port {port}...")
+    log(f"Starting آفاق bot on port {port}")
+    log(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
+    log(f"ANTHROPIC_KEY set: {bool(ANTHROPIC_KEY)}")
     HTTPServer(("0.0.0.0", port), WebhookHandler).serve_forever()
