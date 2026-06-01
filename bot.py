@@ -6,7 +6,7 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 def log(msg):
@@ -86,25 +86,24 @@ def send_typing(chat_id):
         log(f"send_typing error: {e}")
 
 def call_claude(system, user):
-    log("Calling Claude API...")
-    r = requests.post("https://api.anthropic.com/v1/messages",
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_KEY,
-            "anthropic-version": "2023-06-01"
-        },
+    log("Calling Gemini API...")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    r = requests.post(url,
+        headers={"Content-Type": "application/json"},
         json={
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 4000,
-            "system": system,
-            "messages": [{"role": "user", "content": user}]
+            "contents": [{"parts": [{"text": system + "\n\n" + user}]}],
+            "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.7}
         },
         timeout=60
     )
-    log(f"Claude API status: {r.status_code}")
+    log(f"Gemini API status: {r.status_code}")
     data = r.json()
-    result = "".join(b["text"] for b in data.get("content", []) if b["type"] == "text")
-    log(f"Claude response length: {len(result)}")
+    try:
+        result = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        log(f"Gemini parse error: {data}")
+        result = ""
+    log(f"Gemini response length: {len(result)}")
     return result
 
 def run_agent(chat_id, pillar_key):
@@ -189,5 +188,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     log(f"Starting آفاق bot on port {port}")
     log(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
-    log(f"ANTHROPIC_KEY set: {bool(ANTHROPIC_KEY)}")
+    log(f"GEMINI_KEY set: {bool(GEMINI_KEY)}")
     HTTPServer(("0.0.0.0", port), WebhookHandler).serve_forever()
