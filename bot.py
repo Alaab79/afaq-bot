@@ -95,7 +95,7 @@ def call_claude(system, user):
         },
         json={
             "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1000,
+            "max_tokens": 4000,
             "system": system,
             "messages": [{"role": "user", "content": user}]
         },
@@ -103,7 +103,9 @@ def call_claude(system, user):
     )
     log(f"Claude API status: {r.status_code}")
     data = r.json()
-    return "".join(b["text"] for b in data.get("content", []) if b["type"] == "text")
+    result = "".join(b["text"] for b in data.get("content", []) if b["type"] == "text")
+    log(f"Claude response length: {len(result)}")
+    return result
 
 def run_agent(chat_id, pillar_key):
     log(f"run_agent called with pillar: {pillar_key}")
