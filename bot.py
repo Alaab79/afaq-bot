@@ -6,7 +6,7 @@ import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-GROQ_KEY       = os.environ.get("GROQ_API_KEY", "")
+ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 PROCESSED      = set()
 
@@ -40,39 +40,30 @@ def download_file(file_id):
         return None
 
 def call_groq(system, user):
-    log("Calling Groq...")
-    for attempt in range(3):
-        try:
-            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {GROQ_KEY}"
-                },
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "max_tokens": 4000,
-                    "temperature": 0.7,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user}
-                    ]
-                },
-                timeout=90
-            )
-            log(f"Groq status: {r.status_code}")
-            if r.status_code == 429:
-                wait = 30 * (attempt + 1)
-                log(f"Rate limited — waiting {wait}s")
-                time.sleep(wait)
-                continue
-            data = r.json()
-            result = data["choices"][0]["message"]["content"]
-            log(f"Groq length: {len(result)}")
-            return result
-        except Exception as e:
-            log(f"Groq error: {e}")
-            time.sleep(10)
-    return ""
+    log("Calling Claude API...")
+    try:
+        r = requests.post("https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 4000,
+                "system": system,
+                "messages": [{"role": "user", "content": user}]
+            },
+            timeout=90
+        )
+        log(f"Claude status: {r.status_code}")
+        data = r.json()
+        result = "".join(b["text"] for b in data.get("content", []) if b["type"] == "text")
+        log(f"Claude length: {len(result)}")
+        return result
+    except Exception as e:
+        log(f"Claude error: {e}")
+        return ""
 
 def smart_sample(transcript, max_chars=12000):
     total = len(transcript)
@@ -243,5 +234,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     log(f"Starting Afaq bot on port {port}")
     log(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
-    log(f"GROQ_KEY set: {bool(GROQ_KEY)}")
+    log(f"ANTHROPIC_KEY set: {bool(ANTHROPIC_KEY)}")
     HTTPServer(("0.0.0.0", port), WebhookHandler).serve_forever()
