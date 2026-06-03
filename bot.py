@@ -168,6 +168,13 @@ def handle_update(update):
         return
     PROCESSED.add(update_id)
 
+    # Ignore messages older than 60 seconds
+    msg_date = update.get("message", {}).get("date", 0)
+    age = time.time() - msg_date
+    if age > 60:
+        log(f"Message too old ({int(age)}s) — skipping")
+        return
+
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
     if not chat_id:
