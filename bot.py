@@ -1,6 +1,4 @@
 import os
-import re
-import sys
 import json
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -15,8 +13,7 @@ def log(msg):
 def send_message(chat_id, text):
     try:
         r = requests.post(f"{TELEGRAM_API}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": text
+            "chat_id": chat_id, "text": text
         }, timeout=15)
         log(f"send_message: {r.status_code}")
     except Exception as e:
@@ -28,6 +25,17 @@ def send_typing(chat_id):
             "chat_id": chat_id, "action": "typing"
         }, timeout=5)
     except: pass
+
+def download_file(file_id):
+    try:
+        r = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}", timeout=10)
+        file_path = r.json()["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        content = requests.get(file_url, timeout=30)
+        return content.text
+    except Exception as e:
+        log(f"download_file error: {e}")
+        return None
 
 def call_groq(system, user):
     log("Calling Groq...")
@@ -89,21 +97,27 @@ TITLE_SYSTEM = """أنت خبير SEO يوتيوب عربي. اكتب عنوان
 def generate_script(chat_id, transcript):
     send_typing(chat_id)
     send_message(chat_id, "⚙️ جارٍ استخراج أهم الأفكار من الحلقة...")
+
     insights = call_groq(
-        "You are a content analyst. Extract the 6 most surprising, specific, and valuable insights from this podcast transcript. Include exact numbers, statistics, quotes, and specific stories mentioned by the speaker. Be specific — no generic summaries. Return a numbered list.",
-        f"Transcript:\n{transcript[:10000]}"
+        "You are a content analyst. Extract the 6 most surprising, specific, and valuable insights from this podcast transcript. Include exact numbers, statistics, quotes, and specific stories. Be specific — no generic summaries. Return a numbered list.",
+        f"Transcript:\n{transcript[:12000]}"
     )
     log(f"Insights: {len(insights)} chars")
+
     send_message(chat_id, "✅ تم استخراج الأفكار\n⚙️ جارٍ كتابة النص العربي...")
+
     script = call_groq(
         SCRIPT_SYSTEM,
         f"هذه الأفكار والحقائق الحقيقية المستخرجة من الحلقة:\n{insights}\n\nاكتب نصاً عربياً أصيلاً مدته 7 دقائق يستخدم هذه الحقائق مع إضافة سياق عربي وخليجي حقيقي."
     )
+
     title = call_groq(
         TITLE_SYSTEM,
         f"الأفكار الرئيسية:\n{insights[:500]}\n\nاكتب عنواناً واحداً فقط."
     )
+
     header = f"✅ النص جاهز!\n\n📺 العنوان:\n{title.strip()}\n\n"
+
     if len(header) + len(script) > 4000:
         send_message(chat_id, header)
         chunks = [script[i:i+3800] for i in range(0, len(script), 3800)]
@@ -111,43 +125,87 @@ def generate_script(chat_id, transcript):
             send_message(chat_id, f"📝 النص ({i+1}/{len(chunks)}):\n{chunk}")
     else:
         send_message(chat_id, header + f"📝 النص:\n{script}")
-    log("Script delivered")
 
-HOW_TO_TEXT = """📋 كيف تحصل على نص الحلقة:
+    # Also send as a text file for easy copying
+    try:
+        full_text = f"العنوان:\n{title.strip()}\n\n{script}"
+        files = {'document': ('script.txt', full_text.encode('utf-8'), 'text/plain')}
+        requests.post(f"{TELEGRAM_API}/sendDocument",
+            data={"chat_id": chat_id, "caption": "📄 النص كاملاً — اضغط لتنزيله"},
+            files=files, timeout=30)
+        log("File sent")
+    except Exception as e:
+        log(f"File send error: {e}")
+
+HOW_TO_TEXT = """📋 كيف ترسل نص الحلقة:
 
 1️⃣ اذهب إلى tactiq.io/tools/youtube-transcript
 2️⃣ الصق رابط الحلقة
-3️⃣ انسخ النص كاملاً
-4️⃣ أرسله هنا هكذا:
-/script [النص هنا]"""
+3️⃣ انقر Copy أو Download
+4️⃣ احفظ النص كملف .txt
+5️⃣ أرسل الملف مباشرة هنا في المحادثة
+
+الروبوت سيقرأ الملف ويكتب لك النص العربي تلقائياً ✅"""
 
 HELP_TEXT = """مرحباً! أنا وكيل آفاق للمحتوى 🎬
 
+أرسل لي ملف .txt يحتوي على نص أي حلقة بودكاست وسأحوّله إلى نص يوتيوب عربي احترافي.
+
 الأوامر:
-/script [النص] — حوّل نص الحلقة إلى سكريبت عربي
-/how — كيف تحصل على نص الحلقة
-/help — المساعدة"""
+/how — كيف ترسل نص الحلقة
+/help — المساعدة
+
+المصادر الموصى بها:
+• Lex Fridman Podcast
+• Diary of a CEO  
+• Peter Zeihan
+• All-In Podcast
+• My First Million"""
 
 def handle_update(update):
-    log(f"Update: {json.dumps(update)[:150]}")
+    log(f"Update: {json.dumps(update)[:200]}")
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
-    text = msg.get("text", "").strip()
-    if not chat_id or not text:
+
+    if not chat_id:
         return
-    log(f"chat_id: {chat_id}, command: {text[:60]}")
-    if text.lower() in ["/start", "/help"]:
-        send_message(chat_id, HELP_TEXT)
-    elif text.lower() == "/how":
-        send_message(chat_id, HOW_TO_TEXT)
-    elif text.lower().startswith("/script"):
-        transcript = text[7:].strip()
-        if len(transcript) < 200:
-            send_message(chat_id, "⚠️ النص قصير جداً — أرسل /how للمساعدة.")
+
+    # Handle text commands
+    text = msg.get("text", "").strip()
+    if text:
+        log(f"Text: {text[:60]}")
+        if text.lower() in ["/start", "/help"]:
+            send_message(chat_id, HELP_TEXT)
+        elif text.lower() == "/how":
+            send_message(chat_id, HOW_TO_TEXT)
         else:
-            generate_script(chat_id, transcript)
-    else:
-        send_message(chat_id, "أرسل /how للمساعدة أو /script [النص] لتوليد السكريبت.")
+            send_message(chat_id, "أرسل لي ملف .txt يحتوي على نص الحلقة.\n\nأرسل /how لمعرفة كيفية الحصول على النص.")
+        return
+
+    # Handle document upload
+    doc = msg.get("document", {})
+    if doc:
+        file_name = doc.get("file_name", "")
+        file_id = doc.get("file_id", "")
+        mime_type = doc.get("mime_type", "")
+        log(f"Document received: {file_name} ({mime_type})")
+
+        if not file_id:
+            send_message(chat_id, "❌ لم أتمكن من قراءة الملف.")
+            return
+
+        send_message(chat_id, "📥 جارٍ قراءة الملف...")
+        transcript = download_file(file_id)
+
+        if not transcript or len(transcript.strip()) < 200:
+            send_message(chat_id, "❌ الملف فارغ أو قصير جداً.\n\nتأكد أن الملف يحتوي على نص الحلقة كاملاً.")
+            return
+
+        log(f"Transcript loaded: {len(transcript)} chars")
+        generate_script(chat_id, transcript)
+        return
+
+    send_message(chat_id, "أرسل لي ملف .txt يحتوي على نص الحلقة.\n\nأرسل /how للمساعدة.")
 
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -155,6 +213,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Afaq bot is running.")
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
@@ -166,6 +225,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             handle_update(update)
         except Exception as e:
             log(f"POST error: {e}")
+
     def log_message(self, *args):
         pass
 
