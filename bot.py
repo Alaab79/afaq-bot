@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -37,33 +38,41 @@ def download_file(file_id):
         log(f"download_file error: {e}")
         return None
 
-def call_groq(system, user):
+def call_groq(system, user, retries=3):
     log("Calling Groq...")
-    try:
-        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {GROQ_KEY}"
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "max_tokens": 4000,
-                "temperature": 0.7,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ]
-            },
-            timeout=90
-        )
-        log(f"Groq status: {r.status_code}")
-        data = r.json()
-        result = data["choices"][0]["message"]["content"]
-        log(f"Groq response length: {len(result)}")
-        return result
-    except Exception as e:
-        log(f"Groq error: {e}")
-        return ""
+    for attempt in range(retries):
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {GROQ_KEY}"
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "max_tokens": 4000,
+                    "temperature": 0.7,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ]
+                },
+                timeout=90
+            )
+            log(f"Groq status: {r.status_code}")
+            if r.status_code == 429:
+                wait = 15 * (attempt + 1)
+                log(f"Rate limited — waiting {wait}s before retry {attempt+1}/{retries}")
+                time.sleep(wait)
+                continue
+            data = r.json()
+            result = data["choices"][0]["message"]["content"]
+            log(f"Groq response length: {len(result)}")
+            return result
+        except Exception as e:
+            log(f"Groq error: {e}")
+            if attempt < retries - 1:
+                time.sleep(10)
+    return ""
 
 SCRIPT_SYSTEM = """أنت كاتب محتوى محترف لقناة آفاق على يوتيوب. مهمتك تحويل محتوى بودكاست إنجليزي إلى نص يوتيوب عربي استثنائي.
 
@@ -94,14 +103,36 @@ TITLE_SYSTEM = """أنت خبير SEO يوتيوب عربي. اكتب عنوان
 - لا يتجاوز 60 حرفاً
 - بالعربية فقط"""
 
+def extract_insights_from_full_transcript(transcript):
+    """Split transcript into chunks and extract insights from each, then merge best ones."""
+    chunk_size = 8000
+    chunks = [transcript[i:i+chunk_size] for i in range(0, min(len(transcript), 48000), chunk_size)]
+    log(f"Processing {len(chunks)} chunks from transcript")
+
+    all_insights = []
+    for i, chunk in enumerate(chunks):
+        log(f"Processing chunk {i+1}/{len(chunks)}")
+        result = call_groq(
+            "You are a content analyst. Extract the 3 most surprising, specific, and valuable insights from this podcast transcript chunk. Include exact numbers, statistics, quotes, and specific stories. Be specific — no generic summaries. Return a numbered list.",
+            f"Transcript chunk {i+1}:\n{chunk}"
+        )
+        if result:
+            all_insights.append(result)
+        time.sleep(3)  # avoid rate limiting between chunks
+
+    # Merge and pick best 6 from all chunks
+    combined = "\n\n".join(all_insights)
+    best_insights = call_groq(
+        "You are a content analyst. From the following insights extracted from different parts of a podcast, select and refine the 6 most surprising, specific, and valuable ones. Include exact numbers, statistics, and stories. Return a clean numbered list of exactly 6 insights.",
+        f"All extracted insights:\n{combined[:12000]}"
+    )
+    return best_insights
+
 def generate_script(chat_id, transcript):
     send_typing(chat_id)
-    send_message(chat_id, "⚙️ جارٍ استخراج أهم الأفكار من الحلقة...")
+    send_message(chat_id, "⚙️ جارٍ مسح الحلقة كاملة واستخراج أفضل الأفكار...")
 
-    insights = call_groq(
-        "You are a content analyst. Extract the 6 most surprising, specific, and valuable insights from this podcast transcript. Include exact numbers, statistics, quotes, and specific stories. Be specific — no generic summaries. Return a numbered list.",
-        f"Transcript:\n{transcript[:12000]}"
-    )
+    insights = extract_insights_from_full_transcript(transcript)
     log(f"Insights: {len(insights)} chars")
 
     send_message(chat_id, "✅ تم استخراج الأفكار\n⚙️ جارٍ كتابة النص العربي...")
