@@ -8,6 +8,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GROQ_KEY       = os.environ.get("GROQ_API_KEY", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+PROCESSED = set()  # prevent duplicate processing
+
 def log(msg):
     print(msg, flush=True)
 
@@ -38,9 +40,9 @@ def download_file(file_id):
         log(f"download_file error: {e}")
         return None
 
-def call_groq(system, user, retries=3):
+def call_groq(system, user):
     log("Calling Groq...")
-    for attempt in range(retries):
+    for attempt in range(3):
         try:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={
@@ -60,109 +62,89 @@ def call_groq(system, user, retries=3):
             )
             log(f"Groq status: {r.status_code}")
             if r.status_code == 429:
-                wait = 15 * (attempt + 1)
-                log(f"Rate limited — waiting {wait}s before retry {attempt+1}/{retries}")
+                wait = 30 * (attempt + 1)
+                log(f"Rate limited — waiting {wait}s")
                 time.sleep(wait)
                 continue
             data = r.json()
             result = data["choices"][0]["message"]["content"]
-            log(f"Groq response length: {len(result)}")
+            log(f"Groq length: {len(result)}")
             return result
         except Exception as e:
             log(f"Groq error: {e}")
-            if attempt < retries - 1:
-                time.sleep(10)
+            time.sleep(10)
     return ""
 
-SCRIPT_SYSTEM = """أنت كاتب محتوى محترف لقناة آفاق على يوتيوب. مهمتك تحويل محتوى بودكاست إنجليزي إلى نص يوتيوب عربي استثنائي.
-
-قواعد إلزامية:
-- اكتب بالعربية الفصحى المبسطة — راقية لكن مفهومة لكل العرب
-- جمل قصيرة وإيقاع سريع — لا جملة تتجاوز 20 كلمة
-- ممنوع أي كلمة إنجليزية — حتى المصطلحات التقنية تُعرَّب
-- ممنوع تكرار "على سبيل المثال" — مرة واحدة فقط في كل النص
-- لا تبدأ بـ "مرحباً" أو "في هذا الفيديو" أو "هل تعلم أن"
-- استخدم الحقائق والأرقام والقصص الحقيقية من المحتوى المقدم
-- أضف سياقاً عربياً — اربط كل فكرة بالواقع الخليجي والعربي
-
-هيكل النص:
-[خطاف] إحصائية صادمة أو جملة مقلقة — 15 ثانية
-[مقدمة] ما ستتعلمه وليه يهمك كعربي — 30 ثانية
-[نقطة 1] فكرة حقيقية من المحتوى + رقم أو قصة + تطبيق عربي
-[نقطة 2] فكرة حقيقية من المحتوى + رقم أو قصة + تطبيق عربي
-[نقطة 3] فكرة حقيقية من المحتوى + رقم أو قصة + تطبيق عربي
-[نقطة 4] فكرة حقيقية من المحتوى + رقم أو قصة + تطبيق عربي
-[خلاصة] أهم درس في 3 جمل
-[دعوة] اشترك في القناة — فيديو جديد كل أسبوع
-
-اكتب النص فقط — بدون عناوين الأقسام."""
-
-TITLE_SYSTEM = """أنت خبير SEO يوتيوب عربي. اكتب عنواناً واحداً فقط بدون أي نص إضافي.
-- يثير فضول المشاهد ويجعله ينقر فوراً
-- يحتوي على رقم أو سؤال أو وعد واضح
-- لا يتجاوز 60 حرفاً
-- بالعربية فقط"""
-
-def extract_insights_from_full_transcript(transcript):
-    """Split transcript into chunks and extract insights from each, then merge best ones."""
-    chunk_size = 8000
-    chunks = [transcript[i:i+chunk_size] for i in range(0, min(len(transcript), 48000), chunk_size)]
-    log(f"Processing {len(chunks)} chunks from transcript")
-
-    all_insights = []
-    for i, chunk in enumerate(chunks):
-        log(f"Processing chunk {i+1}/{len(chunks)}")
-        result = call_groq(
-            "You are a content analyst. Extract the 3 most surprising, specific, and valuable insights from this podcast transcript chunk. Include exact numbers, statistics, quotes, and specific stories. Be specific — no generic summaries. Return a numbered list.",
-            f"Transcript chunk {i+1}:\n{chunk}"
-        )
-        if result:
-            all_insights.append(result)
-        time.sleep(3)  # avoid rate limiting between chunks
-
-    # Merge and pick best 6 from all chunks
-    combined = "\n\n".join(all_insights)
-    best_insights = call_groq(
-        "You are a content analyst. From the following insights extracted from different parts of a podcast, select and refine the 6 most surprising, specific, and valuable ones. Include exact numbers, statistics, and stories. Return a clean numbered list of exactly 6 insights.",
-        f"All extracted insights:\n{combined[:12000]}"
-    )
-    return best_insights
+def smart_sample(transcript, max_chars=14000):
+    """Sample beginning, middle, and end of transcript for best coverage."""
+    total = len(transcript)
+    if total <= max_chars:
+        return transcript
+    third = max_chars // 3
+    beginning = transcript[:third]
+    mid_start = (total // 2) - (third // 2)
+    middle = transcript[mid_start:mid_start + third]
+    end = transcript[-third:]
+    return f"{beginning}\n\n[...]\n\n{middle}\n\n[...]\n\n{end}"
 
 def generate_script(chat_id, transcript):
     send_typing(chat_id)
-    send_message(chat_id, "⚙️ جارٍ مسح الحلقة كاملة واستخراج أفضل الأفكار...")
+    send_message(chat_id, "⚙️ جارٍ تحليل الحلقة وكتابة النص العربي...")
 
-    insights = extract_insights_from_full_transcript(transcript)
-    log(f"Insights: {len(insights)} chars")
+    # Smart sample — beginning, middle, end
+    sampled = smart_sample(transcript)
+    log(f"Sampled transcript: {len(sampled)} chars from {len(transcript)} total")
 
-    send_message(chat_id, "✅ تم استخراج الأفكار\n⚙️ جارٍ كتابة النص العربي...")
+    # Single call — extract insights AND write script together
+    result = call_groq(
+        """أنت كاتب محتوى محترف لقناة آفاق على يوتيوب.
 
-    script = call_groq(
-        SCRIPT_SYSTEM,
-        f"هذه الأفكار والحقائق الحقيقية المستخرجة من الحلقة:\n{insights}\n\nاكتب نصاً عربياً أصيلاً مدته 7 دقائق يستخدم هذه الحقائق مع إضافة سياق عربي وخليجي حقيقي."
+مهمتك:
+1. استخرج أفضل 5 أفكار حقيقية من النص المرفق (أرقام، قصص، اقتباسات)
+2. اكتب نص يوتيوب عربي كامل مدته 7 دقائق بناءً على هذه الأفكار
+
+قواعد النص:
+- عربية فصحى مبسطة — راقية ومفهومة
+- جمل قصيرة — لا جملة تتجاوز 20 كلمة
+- ممنوع أي كلمة إنجليزية
+- ابدأ بجملة صادمة أو إحصائية مدهشة — لا "مرحباً" أو "هل تعلم أن"
+- أضف سياقاً خليجياً وعربياً حقيقياً
+
+هيكل النص:
+خطاف قوي (15 ثانية) ← مقدمة (30 ثانية) ← 4 نقاط بأفكار حقيقية وأمثلة عربية ← خلاصة ← دعوة للاشتراك
+
+أرسل النص فقط بدون عناوين الأقسام.""",
+        f"نص الحلقة:\n{sampled}"
     )
 
+    if not result:
+        send_message(chat_id, "❌ حدث خطأ أثناء الكتابة. حاول مرة أخرى بعد دقيقتين.")
+        return
+
+    # Generate title separately
+    time.sleep(5)
     title = call_groq(
-        TITLE_SYSTEM,
-        f"الأفكار الرئيسية:\n{insights[:500]}\n\nاكتب عنواناً واحداً فقط."
+        "اكتب عنواناً يوتيوب عربياً واحداً فقط — جذاب، يحتوي رقماً أو سؤالاً، لا يتجاوز 60 حرفاً. بدون أي نص إضافي.",
+        f"النص:\n{result[:500]}"
     )
 
     header = f"✅ النص جاهز!\n\n📺 العنوان:\n{title.strip()}\n\n"
 
-    if len(header) + len(script) > 4000:
+    # Send as messages
+    if len(header) + len(result) > 4000:
         send_message(chat_id, header)
-        chunks = [script[i:i+3800] for i in range(0, len(script), 3800)]
+        chunks = [result[i:i+3800] for i in range(0, len(result), 3800)]
         for i, chunk in enumerate(chunks):
             send_message(chat_id, f"📝 النص ({i+1}/{len(chunks)}):\n{chunk}")
     else:
-        send_message(chat_id, header + f"📝 النص:\n{script}")
+        send_message(chat_id, header + f"📝 النص:\n{result}")
 
-    # Also send as a text file for easy copying
+    # Send as downloadable file
     try:
-        full_text = f"العنوان:\n{title.strip()}\n\n{script}"
+        full_text = f"العنوان:\n{title.strip()}\n\n{result}"
         files = {'document': ('script.txt', full_text.encode('utf-8'), 'text/plain')}
         requests.post(f"{TELEGRAM_API}/sendDocument",
-            data={"chat_id": chat_id, "caption": "📄 النص كاملاً — اضغط لتنزيله"},
+            data={"chat_id": chat_id, "caption": "📄 النص كاملاً للتنزيل"},
             files=files, timeout=30)
         log("File sent")
     except Exception as e:
@@ -172,36 +154,34 @@ HOW_TO_TEXT = """📋 كيف ترسل نص الحلقة:
 
 1️⃣ اذهب إلى tactiq.io/tools/youtube-transcript
 2️⃣ الصق رابط الحلقة
-3️⃣ انقر Copy أو Download
-4️⃣ احفظ النص كملف .txt
-5️⃣ أرسل الملف مباشرة هنا في المحادثة
+3️⃣ انقر Download — يحفظ ملف .txt
+4️⃣ أرسل الملف هنا مباشرة
 
-الروبوت سيقرأ الملف ويكتب لك النص العربي تلقائياً ✅"""
+الروبوت يقرأ الملف ويكتب النص العربي تلقائياً ✅"""
 
 HELP_TEXT = """مرحباً! أنا وكيل آفاق للمحتوى 🎬
 
-أرسل لي ملف .txt يحتوي على نص أي حلقة بودكاست وسأحوّله إلى نص يوتيوب عربي احترافي.
+أرسل لي ملف .txt لأي حلقة بودكاست وسأكتب لك نص يوتيوب عربي احترافي.
 
-الأوامر:
-/how — كيف ترسل نص الحلقة
-/help — المساعدة
-
-المصادر الموصى بها:
-• Lex Fridman Podcast
-• Diary of a CEO  
-• Peter Zeihan
-• All-In Podcast
-• My First Million"""
+/how — كيف تحصل على الملف
+/help — المساعدة"""
 
 def handle_update(update):
-    log(f"Update: {json.dumps(update)[:200]}")
+    update_id = update.get("update_id")
+
+    # Prevent duplicate processing
+    if update_id in PROCESSED:
+        log(f"Duplicate update {update_id} — skipping")
+        return
+    PROCESSED.add(update_id)
+
+    log(f"Update {update_id}: {json.dumps(update)[:150]}")
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
 
     if not chat_id:
         return
 
-    # Handle text commands
     text = msg.get("text", "").strip()
     if text:
         log(f"Text: {text[:60]}")
@@ -210,33 +190,27 @@ def handle_update(update):
         elif text.lower() == "/how":
             send_message(chat_id, HOW_TO_TEXT)
         else:
-            send_message(chat_id, "أرسل لي ملف .txt يحتوي على نص الحلقة.\n\nأرسل /how لمعرفة كيفية الحصول على النص.")
+            send_message(chat_id, "أرسل ملف .txt يحتوي على نص الحلقة.\n\nأرسل /how للمساعدة.")
         return
 
-    # Handle document upload
     doc = msg.get("document", {})
     if doc:
-        file_name = doc.get("file_name", "")
         file_id = doc.get("file_id", "")
-        mime_type = doc.get("mime_type", "")
-        log(f"Document received: {file_name} ({mime_type})")
-
-        if not file_id:
-            send_message(chat_id, "❌ لم أتمكن من قراءة الملف.")
-            return
+        file_name = doc.get("file_name", "")
+        log(f"Document: {file_name}")
 
         send_message(chat_id, "📥 جارٍ قراءة الملف...")
         transcript = download_file(file_id)
 
         if not transcript or len(transcript.strip()) < 200:
-            send_message(chat_id, "❌ الملف فارغ أو قصير جداً.\n\nتأكد أن الملف يحتوي على نص الحلقة كاملاً.")
+            send_message(chat_id, "❌ الملف فارغ أو قصير جداً.")
             return
 
-        log(f"Transcript loaded: {len(transcript)} chars")
+        log(f"Transcript: {len(transcript)} chars")
         generate_script(chat_id, transcript)
         return
 
-    send_message(chat_id, "أرسل لي ملف .txt يحتوي على نص الحلقة.\n\nأرسل /how للمساعدة.")
+    send_message(chat_id, "أرسل ملف .txt للحصول على النص العربي.\n\nأرسل /how للمساعدة.")
 
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
