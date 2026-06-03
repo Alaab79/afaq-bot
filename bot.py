@@ -1,14 +1,14 @@
 import os
 import json
 import time
+import threading
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GROQ_KEY       = os.environ.get("GROQ_API_KEY", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-PROCESSED = set()  # prevent duplicate processing
+PROCESSED      = set()
 
 def log(msg):
     print(msg, flush=True)
@@ -34,8 +34,7 @@ def download_file(file_id):
         r = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}", timeout=10)
         file_path = r.json()["result"]["file_path"]
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-        content = requests.get(file_url, timeout=30)
-        return content.text
+        return requests.get(file_url, timeout=30).text
     except Exception as e:
         log(f"download_file error: {e}")
         return None
@@ -75,116 +74,107 @@ def call_groq(system, user):
             time.sleep(10)
     return ""
 
-def smart_sample(transcript, max_chars=14000):
-    """Sample beginning, middle, and end of transcript for best coverage."""
+def smart_sample(transcript, max_chars=12000):
     total = len(transcript)
     if total <= max_chars:
         return transcript
     third = max_chars // 3
-    beginning = transcript[:third]
     mid_start = (total // 2) - (third // 2)
-    middle = transcript[mid_start:mid_start + third]
-    end = transcript[-third:]
-    return f"{beginning}\n\n[...]\n\n{middle}\n\n[...]\n\n{end}"
+    return (transcript[:third] + "\n\n[...]\n\n" +
+            transcript[mid_start:mid_start+third] + "\n\n[...]\n\n" +
+            transcript[-third:])
 
-def generate_script(chat_id, transcript):
-    send_typing(chat_id)
-    send_message(chat_id, "⚙️ جارٍ تحليل الحلقة وكتابة النص العربي...")
-
-    # Smart sample — beginning, middle, end
-    sampled = smart_sample(transcript)
-    log(f"Sampled transcript: {len(sampled)} chars from {len(transcript)} total")
-
-    # Single call — extract insights AND write script together
-    result = call_groq(
-        """أنت كاتب محتوى محترف لقناة آفاق على يوتيوب.
-
-مهمتك:
-1. استخرج أفضل 5 أفكار حقيقية من النص المرفق (أرقام، قصص، اقتباسات)
-2. اكتب نص يوتيوب عربي كامل مدته 7 دقائق بناءً على هذه الأفكار
-
-قواعد النص:
-- عربية فصحى مبسطة — راقية ومفهومة
-- جمل قصيرة — لا جملة تتجاوز 20 كلمة
-- ممنوع أي كلمة إنجليزية
-- ابدأ بجملة صادمة أو إحصائية مدهشة — لا "مرحباً" أو "هل تعلم أن"
-- أضف سياقاً خليجياً وعربياً حقيقياً
-
-هيكل النص:
-خطاف قوي (15 ثانية) ← مقدمة (30 ثانية) ← 4 نقاط بأفكار حقيقية وأمثلة عربية ← خلاصة ← دعوة للاشتراك
-
-أرسل النص فقط بدون عناوين الأقسام.""",
-        f"نص الحلقة:\n{sampled}"
-    )
-
-    if not result:
-        send_message(chat_id, "❌ حدث خطأ أثناء الكتابة. حاول مرة أخرى بعد دقيقتين.")
-        return
-
-    # Generate title separately
-    time.sleep(5)
-    title = call_groq(
-        "اكتب عنواناً يوتيوب عربياً واحداً فقط — جذاب، يحتوي رقماً أو سؤالاً، لا يتجاوز 60 حرفاً. بدون أي نص إضافي.",
-        f"النص:\n{result[:500]}"
-    )
-
-    header = f"✅ النص جاهز!\n\n📺 العنوان:\n{title.strip()}\n\n"
-
-    # Send as messages
-    if len(header) + len(result) > 4000:
-        send_message(chat_id, header)
-        chunks = [result[i:i+3800] for i in range(0, len(result), 3800)]
-        for i, chunk in enumerate(chunks):
-            send_message(chat_id, f"📝 النص ({i+1}/{len(chunks)}):\n{chunk}")
-    else:
-        send_message(chat_id, header + f"📝 النص:\n{result}")
-
-    # Send as downloadable file
+def process_transcript(chat_id, transcript):
+    """Runs in background thread — Telegram never times out."""
+    log(f"Background processing started for chat {chat_id}")
     try:
-        full_text = f"العنوان:\n{title.strip()}\n\n{result}"
-        files = {'document': ('script.txt', full_text.encode('utf-8'), 'text/plain')}
-        requests.post(f"{TELEGRAM_API}/sendDocument",
-            data={"chat_id": chat_id, "caption": "📄 النص كاملاً للتنزيل"},
-            files=files, timeout=30)
-        log("File sent")
+        sampled = smart_sample(transcript)
+        log(f"Sampled: {len(sampled)} chars from {len(transcript)}")
+
+        send_typing(chat_id)
+
+        script = call_groq(
+            """أنت كاتب محتوى محترف لقناة آفاق على يوتيوب.
+
+مهمتك: اكتب نص يوتيوب عربي كامل مدته 7 دقائق بناءً على محتوى البودكاست المرفق.
+
+قواعد إلزامية:
+- استخدم الحقائق والأرقام والقصص الحقيقية من النص المرفق
+- عربية فصحى مبسطة — جمل قصيرة لا تتجاوز 20 كلمة
+- ممنوع أي كلمة إنجليزية
+- ابدأ بجملة صادمة أو إحصائية — لا "مرحباً" أو "هل تعلم أن"
+- أضف سياقاً خليجياً وعربياً حقيقياً لكل فكرة
+
+الهيكل:
+خطاف قوي ← مقدمة ← 4 نقاط بأفكار حقيقية وأمثلة عربية ← خلاصة ← دعوة للاشتراك
+
+اكتب النص فقط بدون عناوين الأقسام.""",
+            f"نص الحلقة:\n{sampled}"
+        )
+
+        if not script:
+            send_message(chat_id, "❌ حدث خطأ. حاول مرة أخرى بعد دقيقتين.")
+            return
+
+        time.sleep(5)
+
+        title = call_groq(
+            "اكتب عنواناً يوتيوب عربياً واحداً فقط — جذاب، يحتوي رقماً أو سؤالاً، لا يتجاوز 60 حرفاً. بدون أي نص إضافي.",
+            f"النص:\n{script[:400]}"
+        )
+
+        header = f"✅ النص جاهز!\n\n📺 العنوان:\n{title.strip()}\n\n"
+
+        if len(header) + len(script) > 4000:
+            send_message(chat_id, header)
+            for i, chunk in enumerate([script[j:j+3800] for j in range(0, len(script), 3800)]):
+                send_message(chat_id, f"📝 النص ({i+1}):\n{chunk}")
+        else:
+            send_message(chat_id, header + f"📝 النص:\n{script}")
+
+        # Send as file
+        try:
+            full_text = f"العنوان:\n{title.strip()}\n\n{script}"
+            files = {'document': ('script.txt', full_text.encode('utf-8'), 'text/plain')}
+            requests.post(f"{TELEGRAM_API}/sendDocument",
+                data={"chat_id": chat_id, "caption": "📄 النص كاملاً للتنزيل"},
+                files=files, timeout=30)
+            log("File sent successfully")
+        except Exception as e:
+            log(f"File error: {e}")
+
     except Exception as e:
-        log(f"File send error: {e}")
+        log(f"Background processing error: {e}")
+        send_message(chat_id, "❌ حدث خطأ غير متوقع. حاول مرة أخرى.")
 
 HOW_TO_TEXT = """📋 كيف ترسل نص الحلقة:
 
 1️⃣ اذهب إلى tactiq.io/tools/youtube-transcript
 2️⃣ الصق رابط الحلقة
 3️⃣ انقر Download — يحفظ ملف .txt
-4️⃣ أرسل الملف هنا مباشرة
-
-الروبوت يقرأ الملف ويكتب النص العربي تلقائياً ✅"""
+4️⃣ أرسل الملف هنا مباشرة ✅"""
 
 HELP_TEXT = """مرحباً! أنا وكيل آفاق للمحتوى 🎬
 
-أرسل لي ملف .txt لأي حلقة بودكاست وسأكتب لك نص يوتيوب عربي احترافي.
+أرسل لي ملف .txt لأي حلقة بودكاست وسأكتب لك نص يوتيوب عربي في دقيقتين.
 
 /how — كيف تحصل على الملف
 /help — المساعدة"""
 
 def handle_update(update):
     update_id = update.get("update_id")
-
-    # Prevent duplicate processing
     if update_id in PROCESSED:
-        log(f"Duplicate update {update_id} — skipping")
+        log(f"Duplicate {update_id} — skipping")
         return
     PROCESSED.add(update_id)
 
-    log(f"Update {update_id}: {json.dumps(update)[:150]}")
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
-
     if not chat_id:
         return
 
     text = msg.get("text", "").strip()
     if text:
-        log(f"Text: {text[:60]}")
         if text.lower() in ["/start", "/help"]:
             send_message(chat_id, HELP_TEXT)
         elif text.lower() == "/how":
@@ -199,15 +189,21 @@ def handle_update(update):
         file_name = doc.get("file_name", "")
         log(f"Document: {file_name}")
 
-        send_message(chat_id, "📥 جارٍ قراءة الملف...")
-        transcript = download_file(file_id)
+        # Respond to Telegram immediately
+        send_message(chat_id, "📥 استلمت الملف — جارٍ الكتابة...\n\n⏱ سيصلك النص خلال دقيقتين.")
 
+        # Download file
+        transcript = download_file(file_id)
         if not transcript or len(transcript.strip()) < 200:
             send_message(chat_id, "❌ الملف فارغ أو قصير جداً.")
             return
 
-        log(f"Transcript: {len(transcript)} chars")
-        generate_script(chat_id, transcript)
+        log(f"Transcript: {len(transcript)} chars — starting background thread")
+
+        # Process in background — Telegram won't retry
+        t = threading.Thread(target=process_transcript, args=(chat_id, transcript))
+        t.daemon = True
+        t.start()
         return
 
     send_message(chat_id, "أرسل ملف .txt للحصول على النص العربي.\n\nأرسل /how للمساعدة.")
@@ -222,12 +218,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        # Respond to Telegram IMMEDIATELY
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
+        # Process in separate thread
         try:
             update = json.loads(body)
-            handle_update(update)
+            threading.Thread(target=handle_update, args=(update,), daemon=True).start()
         except Exception as e:
             log(f"POST error: {e}")
 
