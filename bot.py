@@ -6,7 +6,7 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 def log(msg):
@@ -86,24 +86,31 @@ def send_typing(chat_id):
         log(f"send_typing error: {e}")
 
 def call_claude(system, user):
-    log("Calling Gemini API...")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-    r = requests.post(url,
-        headers={"Content-Type": "application/json"},
+    log("Calling Groq API...")
+    r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GROQ_KEY}"
+        },
         json={
-            "contents": [{"parts": [{"text": system + "\n\n" + user}]}],
-            "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.7}
+            "model": "llama-3.3-70b-versatile",
+            "max_tokens": 4000,
+            "temperature": 0.7,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ]
         },
         timeout=60
     )
-    log(f"Gemini API status: {r.status_code}")
+    log(f"Groq API status: {r.status_code}")
     data = r.json()
     try:
-        result = data["candidates"][0]["content"]["parts"][0]["text"]
+        result = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError):
-        log(f"Gemini parse error: {data}")
+        log(f"Groq parse error: {data}")
         result = ""
-    log(f"Gemini response length: {len(result)}")
+    log(f"Groq response length: {len(result)}")
     return result
 
 def run_agent(chat_id, pillar_key):
@@ -188,5 +195,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     log(f"Starting آفاق bot on port {port}")
     log(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
-    log(f"GEMINI_KEY set: {bool(GEMINI_KEY)}")
+    log(f"GROQ_KEY set: {bool(GROQ_KEY)}")
     HTTPServer(("0.0.0.0", port), WebhookHandler).serve_forever()
